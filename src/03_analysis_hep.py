@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -44,6 +45,33 @@ def _resolve_ecg_jsons(ecg_dir: Path) -> List[Path]:
     if not js:
         raise FileNotFoundError(f"No .json files found under: {ecg_dir}")
     return js
+
+
+def _resolve_ecg_session_jsons(ecg_dir: Path) -> List[Path]:
+    """Resolve ECG JSONs for HEP sessions.
+
+    This project stores many ECG peak JSONs per subject (baseline, resting, tasks, etc.).
+    HEP should use only the session ECG peaks:
+      - *Session_01*.json  -> sess01
+      - *Session_02*.json  -> sess02
+    """
+    js = _resolve_ecg_jsons(ecg_dir)
+
+    pat1 = re.compile(r"Session_0?1", re.IGNORECASE)
+    pat2 = re.compile(r"Session_0?2", re.IGNORECASE)
+
+    s1 = [p for p in js if pat1.search(p.name) is not None]
+    s2 = [p for p in js if pat2.search(p.name) is not None]
+
+    if len(s1) != 1 or len(s2) != 1:
+        raise RuntimeError(
+            "Could not uniquely resolve ECG JSONs for Session_01/Session_02. "
+            f"Session_01 matches={len(s1)} Session_02 matches={len(s2)} under: {ecg_dir}. "
+            "Expected exactly one JSON containing 'Session_01' (or 'Session_1') and one containing "
+            "'Session_02' (or 'Session_2')."
+        )
+
+    return [s1[0], s2[0]]
 
 
 def _out_fig_dir_for_fif(fif_path: Path, out_dir: Optional[Path]) -> Path:
@@ -216,7 +244,10 @@ def build_argparser() -> argparse.ArgumentParser:
         "--ecg_dir",
         type=str,
         default=None,
-        help="Directory containing ECG peaks JSONs for --subject_id mode (default: data/ecg/<id>/)",
+        help=(
+            "Directory containing ECG peaks JSONs for --subject_id mode (default: data/ecg/<id>/). "
+            "Batch mode will auto-select only *Session_01*.json and *Session_02*.json."
+        ),
     )
 
     p.add_argument(
@@ -322,13 +353,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ecg_dir = Path("data") / "ecg" / subject_id
     else:
         ecg_dir = Path(args.ecg_dir)
-    ecg_jsons = _resolve_ecg_jsons(ecg_dir)
+
+    # Select only session ECG peaks (Session_01/Session_02)
+    ecg_jsons = _resolve_ecg_session_jsons(ecg_dir)
 
     if len(fif_paths) != len(ecg_jsons):
         raise RuntimeError(
             "Processing mismatch error: number of FIF files and ECG JSON files differ. "
             f"fif={len(fif_paths)} json={len(ecg_jsons)}. "
-            "Ensure 1:1 correspondence (name-sorted)."
+            "Ensure 1:1 correspondence for sess01/sess02 <-> Session_01/Session_02."
         )
 
     # In batch mode, figures go under data/processed/<id>/figures by default

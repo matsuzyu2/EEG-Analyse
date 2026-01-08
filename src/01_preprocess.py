@@ -61,14 +61,21 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _resolve_vhdr(subject_id: str) -> Path:
+def _resolve_vhdrs(subject_id: str) -> List[Path]:
     raw_dir = Path("data") / "raw" / subject_id
     if not raw_dir.exists():
         raise FileNotFoundError(f"Raw directory not found: {raw_dir}")
 
     matches = sorted(raw_dir.glob(f"{subject_id}*.vhdr"))
     if len(matches) == 0:
-        raise FileNotFoundError(f"No VHDR files found under: {raw_dir} (pattern: {subject_id}*.vhdr)")
+        raise FileNotFoundError(
+            f"No VHDR files found under: {raw_dir} (pattern: {subject_id}*.vhdr)"
+        )
+    return matches
+
+
+def _resolve_vhdr(subject_id: str) -> Path:
+    matches = _resolve_vhdrs(subject_id)
     if len(matches) > 1:
         _log_warn(
             "Multiple VHDR files detected: "
@@ -353,23 +360,45 @@ def preprocess_one_subject(
     asr_cutoff: float = 20.0,
 ) -> None:
     if vhdr_path is None:
-        vhdr_path = _resolve_vhdr(subject_id)
+        vhdr_paths = _resolve_vhdrs(subject_id)
+    else:
+        vhdr_paths = [Path(vhdr_path)]
 
     if trigger_dir is None:
-        csv_paths = _resolve_trigger_csvs(subject_id)
+        try:
+            csv_paths = _resolve_trigger_csvs(subject_id)
+        except FileNotFoundError as exc:
+            _log_warn(
+                f"Trigger CSVs not found for subject_id='{subject_id}'. Skipping preprocessing. ({exc})"
+            )
+            return
     else:
         trigger_dir = Path(trigger_dir)
         if not trigger_dir.exists():
-            raise FileNotFoundError(f"trigger_dir does not exist: {trigger_dir}")
+            _log_warn(
+                f"trigger_dir does not exist for subject_id='{subject_id}': {trigger_dir}. Skipping preprocessing."
+            )
+            return
         csv_paths = sorted(trigger_dir.glob("*_actichamp_trigger_session.csv"))
         if not csv_paths:
-            raise FileNotFoundError(f"No trigger CSVs under: {trigger_dir}")
+            _log_warn(
+                f"No trigger CSVs under: {trigger_dir} for subject_id='{subject_id}'. Skipping preprocessing."
+            )
+            return
 
     out_dir = out_root / subject_id
     _ensure_dir(out_dir)
 
-    _log_info(f"Reading BrainVision: {vhdr_path}")
-    raw_full = mne.io.read_raw_brainvision(str(vhdr_path), preload=True)
+    if len(vhdr_paths) == 1:
+        _log_info(f"Reading BrainVision: {vhdr_paths[0]}")
+        raw_full = mne.io.read_raw_brainvision(str(vhdr_paths[0]), preload=True)
+    else:
+        _log_warn(
+            f"Multiple VHDR files detected for subject_id='{subject_id}'. "
+            f"Concatenating in filename order: {', '.join(p.name for p in vhdr_paths)}"
+        )
+        raws = [mne.io.read_raw_brainvision(str(p), preload=True) for p in vhdr_paths]
+        raw_full = mne.concatenate_raws(raws)
 
     sfreq = float(raw_full.info["sfreq"])
     _log_info(f"Raw sfreq={sfreq} Hz")

@@ -17,6 +17,10 @@ ENV/
 # VS Code
 .vscode/
 
+# Data files
+data/
+results/
+
 # Common EEG/MEG binary formats (often large)
 *.fif
 *.fif.gz
