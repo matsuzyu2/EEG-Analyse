@@ -11,13 +11,19 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from typing import cast
 
 import matplotlib
 matplotlib.use("Agg")  # headless-safe
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 
 import mne
+
+
+TARGET_SESSION_TYPES = {"increase", "decrease", "inc", "dec"}
+CONTROL_SESSION_TYPES = {"control"}
 
 
 def _log_info(msg: str) -> None:
@@ -26,6 +32,98 @@ def _log_info(msg: str) -> None:
 
 def _log_warn(msg: str) -> None:
     print(f"[WARN] {msg}")
+
+
+def _repo_root() -> Path:
+    # src/03_analysis_hep.py -> repo root is parent of src
+    return Path(__file__).resolve().parents[1]
+
+
+def _processed_dir(subject_id: str) -> Path:
+    return _repo_root() / "data" / "processed" / subject_id
+
+
+def _load_conditions_manifest(subject_id: str) -> Dict:
+    manifest_path = _processed_dir(subject_id) / "conditions_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"conditions_manifest.json not found: {manifest_path}. "
+            "Run src/00_batch_run.py or ensure the manifest exists."
+        )
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _session_type_to_condition(session_type: str) -> str:
+    s = (session_type or "").strip().lower()
+    if s in TARGET_SESSION_TYPES:
+        return "Target"
+    if s in CONTROL_SESSION_TYPES:
+        return "Control"
+    raise ValueError(
+        "Unknown session type in conditions_manifest.json: "
+        f"'{session_type}'. Expected one of Increase/Decrease/Control (or Inc/Dec)."
+    )
+
+
+def _session_tag_to_condition(subject_id: str, sess_tag: str) -> str:
+    manifest = _load_conditions_manifest(subject_id)
+    m = manifest.get("session_condition_map")
+    if not isinstance(m, dict) or not m:
+        raise ValueError(
+            f"Invalid or missing session_condition_map in conditions_manifest.json for {subject_id}"
+        )
+    if sess_tag not in m:
+        raise KeyError(
+            f"session_condition_map has no key '{sess_tag}' for {subject_id}. Keys={list(m.keys())}"
+        )
+    return _session_type_to_condition(str(m[sess_tag]))
+
+
+def _extract_sess_tag(fif_path: Path) -> str:
+    m = re.search(r"_sess(\d{2})_", fif_path.name)
+    if not m:
+        raise ValueError(
+            f"Could not infer session tag (sessXX) from FIF name: {fif_path.name}. "
+            "Expected pattern like '<subject>_sess01_clean.fif'."
+        )
+    return f"sess{m.group(1)}"
+
+
+def _weighted_average_evokeds(evokeds: List[mne.Evoked]) -> mne.Evoked:
+    if not evokeds:
+        raise ValueError("No evokeds provided for averaging")
+    if len(evokeds) == 1:
+        return evokeds[0]
+
+    ref = evokeds[0]
+    for e in evokeds[1:]:
+        if e.ch_names != ref.ch_names:
+            raise ValueError("Evoked channel sets differ; cannot average across sessions")
+        if not np.allclose(e.times, ref.times):
+            raise ValueError("Evoked times differ; cannot average across sessions")
+
+    weights = np.array([max(int(getattr(e, "nave", 0) or 0), 1) for e in evokeds], dtype=float)
+    wsum = float(weights.sum())
+
+    data = np.zeros_like(ref.data, dtype=np.float64)
+    for e, w in zip(evokeds, weights):
+        data += w * e.data.astype(np.float64)
+    data /= wsum
+
+    out = ref.copy()
+    out.data = data
+    out.nave = int(round(wsum))
+    return out
+
+
+def _save_evoked(out_path: Path, evoked: mne.Evoked, overwrite: bool) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not overwrite:
+        _log_info(f"Exists, skip: {out_path}")
+        return
+    mne.write_evokeds(str(out_path), [evoked], overwrite=overwrite)
+    _log_info(f"Saved: {out_path}")
 
 
 def _resolve_input_fifs(subject_id: str) -> List[Path]:
@@ -129,7 +227,7 @@ def _make_hep_events_from_peaks(
     return events
 
 
-def _plot_roi_evoked(evoked: mne.Evoked, roi_chs: List[str], title: str) -> plt.Figure:
+def _plot_roi_evoked(evoked: mne.Evoked, roi_chs: List[str], title: str) -> Figure:
     data = evoked.copy().pick(roi_chs).data  # (n_roi, n_times)
     mean = data.mean(axis=0)
     times_ms = evoked.times * 1e3
@@ -155,7 +253,7 @@ def process_one_pair(
     baseline: Tuple[float, float],
     reject_eeg: float,
     event_id: int,
-) -> None:
+) -> mne.Evoked:
     _log_info(f"Loading EEG: {fif_path}")
     raw = mne.io.read_raw_fif(str(fif_path), preload=True)
 
@@ -192,11 +290,16 @@ def process_one_pair(
 
         # Save drop log for debugging
         fig_drop = epochs.plot_drop_log(show=False)
+        if isinstance(fig_drop, list):
+            fig_drop = fig_drop[0] if len(fig_drop) > 0 else None
         out_png = fig_dir / f"{stem}_hep_drop_log.png"
         out_svg = fig_dir / f"{stem}_hep_drop_log.svg"
-        fig_drop.savefig(out_png, dpi=300, bbox_inches="tight")
-        fig_drop.savefig(out_svg, bbox_inches="tight")
-        plt.close(fig_drop)
+        if fig_drop is not None:
+            fig_drop.savefig(out_png, dpi=300, bbox_inches="tight")
+            fig_drop.savefig(out_svg, bbox_inches="tight")
+            plt.close(fig_drop)
+        else:
+            _log_warn("Could not create a drop-log figure (plot_drop_log returned None)")
 
         raise RuntimeError(
             "All epochs were dropped. Common causes: reject threshold too strict or noisy channels. "
@@ -204,7 +307,7 @@ def process_one_pair(
             "Try increasing --reject_eeg (e.g., 200e-6 or 300e-6) or inspect channel quality."
         )
 
-    evoked = epochs.average()
+    evoked = cast(mne.Evoked, epochs.average())
 
     roi_chs = _select_roi(raw, roi)
 
@@ -212,12 +315,18 @@ def process_one_pair(
     stem = fif_path.stem.replace("_clean", "")
 
     # Butterfly plot
-    fig_butter = evoked.plot(spatial_colors=True, show=False)
+    fig_butter = evoked.plot(spatial_colors="auto", show=False)
+    if isinstance(fig_butter, list):
+        fig_butter = fig_butter[0] if len(fig_butter) > 0 else None
+
     out_png = fig_dir / f"{stem}_hep.png"
     out_svg = fig_dir / f"{stem}_hep.svg"
-    fig_butter.savefig(out_png, dpi=300, bbox_inches="tight")
-    fig_butter.savefig(out_svg, bbox_inches="tight")
-    plt.close(fig_butter)
+    if fig_butter is not None:
+        fig_butter.savefig(out_png, dpi=300, bbox_inches="tight")
+        fig_butter.savefig(out_svg, bbox_inches="tight")
+        plt.close(fig_butter)
+    else:
+        _log_warn("Could not create a butterfly figure (evoked.plot returned None)")
 
     # ROI mean plot
     fig_roi = _plot_roi_evoked(evoked, roi_chs, title=f"HEP - {stem}")
@@ -232,6 +341,7 @@ def process_one_pair(
         + ", ".join([out_png.name, out_svg.name, out_png2.name, out_svg2.name])
     )
 
+    return evoked
 
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="HEP (heartbeat-evoked potential) analysis")
@@ -280,6 +390,12 @@ def build_argparser() -> argparse.ArgumentParser:
         help="EEG rejection threshold in Volts. Default: 100e-6 (100 µV)",
     )
     p.add_argument("--event_id", type=int, default=999, help="Event id for HEP epochs")
+
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing *_hep_target-ave.fif / *_hep_control-ave.fif outputs",
+    )
 
     return p
 
@@ -332,7 +448,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if not ecg_path.exists():
             raise FileNotFoundError(f"ECG JSON not found: {ecg_path}")
 
-        process_one_pair(
+        _ = process_one_pair(
             fif_path=fif_path,
             ecg_json=ecg_path,
             out_dir=out_dir,
@@ -367,9 +483,32 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # In batch mode, figures go under data/processed/<id>/figures by default
     out_dir_batch = Path("data") / "processed" / subject_id
 
+    out_hep_target = out_dir_batch / f"{subject_id}_hep_target-ave.fif"
+    out_hep_control = out_dir_batch / f"{subject_id}_hep_control-ave.fif"
+
+    # If both already exist and overwrite is False, skip everything.
+    if not args.overwrite and out_hep_target.exists() and out_hep_control.exists():
+        _log_info(f"Both target/control HEP evoked exist. Skipping subject: {subject_id}")
+        return
+
+    target_evokeds: List[mne.Evoked] = []
+    control_evokeds: List[mne.Evoked] = []
+
     for fif_path, ecg_json in zip(sorted(fif_paths), sorted(ecg_jsons)):
-        _log_info(f"Pairing: {fif_path.name} <-> {ecg_json.name}")
-        process_one_pair(
+        sess_tag = _extract_sess_tag(fif_path)
+        cond = _session_tag_to_condition(subject_id, sess_tag)
+
+        # Per-session skip if the aggregated output already exists.
+        if not args.overwrite:
+            if cond == "Target" and out_hep_target.exists():
+                _log_info(f"Target evoked already exists; skipping {fif_path.name}")
+                continue
+            if cond == "Control" and out_hep_control.exists():
+                _log_info(f"Control evoked already exists; skipping {fif_path.name}")
+                continue
+
+        _log_info(f"Pairing: {fif_path.name} ({sess_tag} -> {cond}) <-> {ecg_json.name}")
+        evoked = process_one_pair(
             fif_path=fif_path,
             ecg_json=ecg_json,
             out_dir=out_dir_batch,
@@ -380,6 +519,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             reject_eeg=float(args.reject_eeg),
             event_id=int(args.event_id),
         )
+
+        if cond == "Target":
+            target_evokeds.append(evoked)
+        else:
+            control_evokeds.append(evoked)
+
+    if target_evokeds and (args.overwrite or not out_hep_target.exists()):
+        ev_target = _weighted_average_evokeds(target_evokeds)
+        ev_target.comment = f"{subject_id} Target (session-typed)"
+        _save_evoked(out_hep_target, ev_target, overwrite=bool(args.overwrite))
+    elif not target_evokeds:
+        _log_warn(f"No Target sessions found for {subject_id}; not saving {out_hep_target.name}")
+
+    if control_evokeds and (args.overwrite or not out_hep_control.exists()):
+        ev_control = _weighted_average_evokeds(control_evokeds)
+        ev_control.comment = f"{subject_id} Control (session-typed)"
+        _save_evoked(out_hep_control, ev_control, overwrite=bool(args.overwrite))
+    elif not control_evokeds:
+        _log_warn(f"No Control sessions found for {subject_id}; not saving {out_hep_control.name}")
 
 
 if __name__ == "__main__":

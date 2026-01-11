@@ -124,7 +124,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Batch runner: iterate data/conditions/conditions.csv session_id and run pipelines "
-            "(01_preprocess -> 02_analysis_freq -> 03_analysis_hep)."
+            "(01_preprocess -> 02_analysis_tfr -> 03_analysis_hep)."
         )
     )
     p.add_argument(
@@ -169,20 +169,23 @@ def _scan_subject_status(subject_id: str) -> List[str]:
         if not (pdir / f"{subject_id}_{sess}_events.npy").exists():
             issues.append(f"missing_{sess}_events")
 
-        # Frequency analysis outputs
-        if not _has_file(pdir, [f"{subject_id}_{sess}_psd.png", f"{subject_id}_{sess}_psd.svg"]):
-            issues.append(f"missing_{sess}_psd")
-        if not _has_file(
-            pdir,
-            [f"{subject_id}_{sess}_psd_topo.png", f"{subject_id}_{sess}_psd_topo.svg"],
-        ):
-            issues.append(f"missing_{sess}_psd_topo")
-
-        # HEP outputs
+        # HEP per-session figures (kept)
         if not _has_file(pdir, [f"{subject_id}_{sess}_hep.png", f"{subject_id}_{sess}_hep.svg"]):
             issues.append(f"missing_{sess}_hep")
         if not _has_file(pdir, [f"{subject_id}_{sess}_hep_roi.png", f"{subject_id}_{sess}_hep_roi.svg"]):
             issues.append(f"missing_{sess}_hep_roi")
+
+    # TFR outputs (subject-level, session-typed)
+    if not (pdir / f"{subject_id}_tfr_target.h5").exists():
+        issues.append("missing_tfr_target")
+    if not (pdir / f"{subject_id}_tfr_control.h5").exists():
+        issues.append("missing_tfr_control")
+
+    # HEP evoked outputs (subject-level, session-typed)
+    if not (pdir / f"{subject_id}_hep_target-ave.fif").exists():
+        issues.append("missing_hep_target_evoked")
+    if not (pdir / f"{subject_id}_hep_control-ave.fif").exists():
+        issues.append("missing_hep_control_evoked")
 
     return issues
 
@@ -199,7 +202,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     script_dir = Path(__file__).resolve().parent
     preprocess_py = script_dir / "01_preprocess.py"
-    freq_py = script_dir / "02_analysis_freq.py"
+    tfr_py = script_dir / "02_analysis_tfr.py"
     hep_py = script_dir / "03_analysis_hep.py"
 
     failures: Dict[str, List[str]] = {}
@@ -248,10 +251,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             failures.setdefault(sid, []).append("missing_clean_fif")
             continue
 
-        code, cmdline = _run_script(freq_py, ["--subject_id", sid], cwd=root)
+        code, cmdline = _run_script(tfr_py, ["--subject_id", sid], cwd=root)
         if code != 0:
-            _log_warn(f"Frequency analysis failed (exit={code}). Continuing.\n  cmd: {cmdline}")
-            failures.setdefault(sid, []).append(f"freq_exit_{code}")
+            _log_warn(f"TFR analysis failed (exit={code}). Continuing.\n  cmd: {cmdline}")
+            failures.setdefault(sid, []).append(f"tfr_exit_{code}")
             continue
 
         # HEP needs ECG jsons too; the script itself will validate.

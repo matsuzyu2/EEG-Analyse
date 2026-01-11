@@ -28,6 +28,7 @@ mne==1.11.0
 mne-icalabel==0.8.1
 nest-asyncio==1.6.0
 numpy==2.3.5
+h5io
 packaging==25.0
 pandas==2.3.3
 parso==0.8.5
