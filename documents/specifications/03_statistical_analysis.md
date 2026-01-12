@@ -43,25 +43,29 @@ Good Responders に限定して、被験者内差分
 ## 4. ROI定義（辞書定義とチャンネル構成）
 ROIは本スクリプト内で辞書として定義する（探索的・柔軟にするため）。
 
-定義（固定）:
-- `Frontal`: `["Fz", "F1", "F2"]`
+定義（候補）:
+- `Frontal`: `["Fz", "F1", "F2", "F3", "F4", "FCz", "FC1", "FC2", "Cz"]`
 - `Visual`: `["Oz", "O1", "O2"]`
-- `Parietal`: `["Pz", "P3", "P4"]`
+- `Parietal`: `["Pz", "P3", "P4", "CPz", "CP1", "CP2"]`
 
-ROIに含まれるチャンネルがデータに存在しない場合は例外で停止する。
+備考:
+- ROIの定義は「候補チャンネル」のリストとして持ち、被験者ごとのデータに存在しないチャンネルは自動的に除外して平均する（存在chのみで平均）。
+- within-subject（Target/Control差分）のため、ROI平均に用いるチャンネルは **Target/Controlの両方に存在するもの（共通部分）** に限定する。
+  - これにより、被験者内差分が「同一チャンネル集合上の差分」になることを保証する。
+- 共通部分が0チャンネルの場合は当該被験者をスキップし、全体で有効被験者が2名未満になった場合は例外で停止する。
 
 ## 5. データ整形（ROI平均）
 ### 5.1 TFR（AverageTFR）
 - 読み込み: `mne.time_frequency.read_tfrs(path)`
   - MNEのAPI差分により、戻り値が `list[AverageTFR]` または `AverageTFR` の場合があるため、両方を吸収する
-- ROI平均: ROIチャンネルのみを `pick` → `data.mean(axis=0)`
+- ROI平均: ROI候補チャンネルのうち、Target/Controlに共通して存在するチャンネルのみを `pick` → `data.mean(axis=0)`
 - 形状:
   - 被験者ごとの差分 `X_tfr`: `(n_subjects, n_freqs, n_times)`
 
 ### 5.2 HEP（Evoked）
 - 読み込み: `mne.read_evokeds(path, condition=0)`
   - 戻り値が `list[Evoked]` または `Evoked` の差分を吸収
-- ROI平均: ROIチャンネルのみを `pick` → `data.mean(axis=0)`
+- ROI平均: ROI候補チャンネルのうち、Target/Controlに共通して存在するチャンネルのみを `pick` → `data.mean(axis=0)`
 - 形状:
   - 被験者ごとの差分 `X_hep`: `(n_subjects, n_times)`
 
@@ -129,10 +133,18 @@ ROIごとに以下を生成:
 - `tfr_<ROI>_target_control_diff.png`
 - `hep_<ROI>_target_control.png`
 - `stats_<ROI>.npz`
-  - `tfr_cluster_p_values`
-  - `tfr_sig_mask`
-  - `hep_cluster_p_values`
-  - `hep_sig_mask`
+
+NPZの主な保存キー（代表）:
+- ROIメタ:
+  - `roi`
+  - `roi_candidates`（候補チャンネル）
+  - `tfr_roi_channels`（TFRで実際に使われたチャンネル）
+  - `hep_roi_channels`（HEPで実際に使われたチャンネル）
+  - `tfr_subjects`, `hep_subjects`（実際に解析に使われた被験者）
+  - `tfr_roi_pick_mask`, `hep_roi_pick_mask`（(n_subjects, n_candidates) のbool）
+- 検定出力:
+  - `tfr_cluster_p_values`, `tfr_clusters`, `tfr_sig_mask`
+  - `hep_cluster_p_values`, `hep_clusters`, `hep_sig_mask`
 
 ## 9. CLI仕様（主要）
 デフォルト:

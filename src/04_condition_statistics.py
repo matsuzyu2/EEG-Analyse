@@ -111,12 +111,81 @@ def _pick_roi_channels(info: mne.Info, roi_chs: List[str]) -> List[str]:
     return picked
 
 
+def _pick_common_roi_channels(info_a: mne.Info, info_b: mne.Info, roi_candidates: List[str]) -> List[str]:
+    """Pick ROI channels that exist in *both* datasets.
+
+    This keeps within-subject target/control comparisons consistent.
+    """
+    existing_a = set(info_a["ch_names"])
+    existing_b = set(info_b["ch_names"])
+    picked = [ch for ch in roi_candidates if ch in existing_a and ch in existing_b]
+    if not picked:
+        raise ValueError(
+            "None of the ROI channels exist in both datasets. "
+            f"ROI={roi_candidates} example existing_a={list(existing_a)[:10]} existing_b={list(existing_b)[:10]}"
+        )
+    return picked
+
+
+def _roi_pick_mask(info: mne.Info, roi_candidates: List[str]) -> Tuple[List[str], np.ndarray]:
+    picked = _pick_roi_channels(info, roi_candidates)
+    picked_set = set(picked)
+    mask = np.asarray([ch in picked_set for ch in roi_candidates], dtype=bool)
+    return picked, mask
+
+
+def _roi_common_pick_mask(
+    info_a: mne.Info, info_b: mne.Info, roi_candidates: List[str]
+) -> Tuple[List[str], np.ndarray]:
+    picked = _pick_common_roi_channels(info_a, info_b, roi_candidates)
+    picked_set = set(picked)
+    mask = np.asarray([ch in picked_set for ch in roi_candidates], dtype=bool)
+    return picked, mask
+
+
+def _effective_channels_from_masks(roi_candidates: List[str], masks: object) -> List[str]:
+    m = np.asarray(masks)
+    if m.size == 0:
+        return []
+    if m.ndim == 1:
+        any_mask = m.astype(bool)
+    elif m.ndim == 2:
+        any_mask = np.any(m.astype(bool), axis=0)
+    else:
+        raise ValueError("Masks must be 1D (candidates) or 2D (subjects x candidates)")
+    if any_mask.size != len(roi_candidates):
+        raise ValueError("ROI candidate/mask length mismatch")
+    return [ch for ch, ok in zip(roi_candidates, any_mask.tolist()) if ok]
+
+
 def _roi_mean_from_tfr(tfr: mne.time_frequency.AverageTFR, roi_chs: List[str]) -> np.ndarray:
     # Returns (n_freqs, n_times)
     picked = _pick_roi_channels(tfr.info, roi_chs)
     t = tfr.copy().pick(picked)
     data = cast(np.ndarray, t.data)
     return data.mean(axis=0)
+
+
+def _roi_mean_and_mask_from_tfr(
+    tfr: mne.time_frequency.AverageTFR, roi_candidates: List[str]
+) -> Tuple[np.ndarray, List[str], np.ndarray]:
+    picked, mask = _roi_pick_mask(tfr.info, roi_candidates)
+    t = tfr.copy().pick(picked)
+    data = cast(np.ndarray, t.data)
+    return data.mean(axis=0), picked, mask
+
+
+def _roi_mean_and_mask_common_from_tfrs(
+    tfr_a: mne.time_frequency.AverageTFR,
+    tfr_b: mne.time_frequency.AverageTFR,
+    roi_candidates: List[str],
+) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray]:
+    picked, mask = _roi_common_pick_mask(tfr_a.info, tfr_b.info, roi_candidates)
+    ta = tfr_a.copy().pick(picked)
+    tb = tfr_b.copy().pick(picked)
+    da = cast(np.ndarray, ta.data).mean(axis=0)
+    db = cast(np.ndarray, tb.data).mean(axis=0)
+    return da, db, picked, mask
 
 
 def _align_1d_to_reference(
@@ -248,6 +317,25 @@ def _roi_mean_from_evoked(ev: mne.Evoked, roi_chs: List[str]) -> np.ndarray:
     picked = _pick_roi_channels(ev.info, roi_chs)
     e = ev.copy().pick(picked)
     return e.data.mean(axis=0)
+
+
+def _roi_mean_and_mask_from_evoked(
+    ev: mne.Evoked, roi_candidates: List[str]
+) -> Tuple[np.ndarray, List[str], np.ndarray]:
+    picked, mask = _roi_pick_mask(ev.info, roi_candidates)
+    e = ev.copy().pick(picked)
+    return e.data.mean(axis=0), picked, mask
+
+
+def _roi_mean_and_mask_common_from_evokeds(
+    ev_a: mne.Evoked,
+    ev_b: mne.Evoked,
+    roi_candidates: List[str],
+) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray]:
+    picked, mask = _roi_common_pick_mask(ev_a.info, ev_b.info, roi_candidates)
+    ea = ev_a.copy().pick(picked)
+    eb = ev_b.copy().pick(picked)
+    return ea.data.mean(axis=0), eb.data.mean(axis=0), picked, mask
 
 
 def _read_one_evoked(path: Path) -> mne.Evoked:
@@ -521,12 +609,14 @@ def run_analysis(
     for roi_name in roi_names:
         if roi_name not in roi_dict:
             raise KeyError(f"ROI '{roi_name}' not found in roi_dict. Available={list(roi_dict.keys())}")
-        roi_chs = roi_dict[roi_name]
+        roi_candidates = roi_dict[roi_name]
 
         # --- TFR ---
         tfr_diffs: List[np.ndarray] = []
         tfr_targets: List[np.ndarray] = []
         tfr_controls: List[np.ndarray] = []
+        tfr_pick_masks: List[np.ndarray] = []
+        tfr_used_subjects: List[str] = []
         times: Optional[np.ndarray] = None
         freqs: Optional[np.ndarray] = None
 
@@ -534,8 +624,14 @@ def run_analysis(
             tfr_t = _read_average_tfr(a.tfr_target_path)
             tfr_c = _read_average_tfr(a.tfr_control_path)
 
-            data_t = _roi_mean_from_tfr(tfr_t, roi_chs)  # freq x time
-            data_c = _roi_mean_from_tfr(tfr_c, roi_chs)  # freq x time
+            try:
+                data_t, data_c, _picked, pick_mask = _roi_mean_and_mask_common_from_tfrs(
+                    tfr_t, tfr_c, roi_candidates
+                )
+            except Exception as e:
+                _log_warn(f"TFR ROI pick failed for {a.subject_id}; skip: {e}")
+                del tfr_t, tfr_c
+                continue
 
             subj_times = np.asarray(tfr_t.times)
             subj_freqs = np.asarray(tfr_t.freqs)
@@ -575,12 +671,20 @@ def run_analysis(
             tfr_targets.append(data_t)
             tfr_controls.append(data_c)
             tfr_diffs.append(data_t - data_c)
+            tfr_pick_masks.append(np.asarray(pick_mask, dtype=bool))
+            tfr_used_subjects.append(a.subject_id)
 
             # reduce memory
             del tfr_t, tfr_c
 
         if len(tfr_diffs) < 2:
             raise RuntimeError(f"Not enough subjects for TFR statistics after alignment for ROI={roi_name}")
+
+        tfr_effective = _effective_channels_from_masks(
+            roi_candidates,
+            np.stack(tfr_pick_masks, axis=0) if tfr_pick_masks else np.zeros((0, len(roi_candidates)), bool),
+        )
+        _log_info(f"TFR ROI={roi_name}: effective_channels={tfr_effective}")
 
         X_tfr = np.stack(tfr_diffs, axis=0)  # subj x freq x time
         _log_info(f"TFR ROI={roi_name}: X shape={X_tfr.shape}")
@@ -602,7 +706,7 @@ def run_analysis(
         out_png = out_dir / f"tfr_{roi_name}_target_control_diff.png"
         _plot_tfr_triplet(
             roi_name=roi_name,
-            roi_chs=roi_chs,
+            roi_chs=tfr_effective,
             times=times,
             freqs=freqs,
             target_mean=tfr_target_mean,
@@ -638,14 +742,22 @@ def run_analysis(
         hep_targets: List[np.ndarray] = []
         hep_controls: List[np.ndarray] = []
         hep_diffs: List[np.ndarray] = []
+        hep_pick_masks: List[np.ndarray] = []
+        hep_used_subjects: List[str] = []
         hep_times: Optional[np.ndarray] = None
 
         for a in artifacts:
             ev_t = _read_one_evoked(a.hep_target_path)
             ev_c = _read_one_evoked(a.hep_control_path)
 
-            y_t = _roi_mean_from_evoked(ev_t, roi_chs)
-            y_c = _roi_mean_from_evoked(ev_c, roi_chs)
+            try:
+                y_t, y_c, _picked, pick_mask = _roi_mean_and_mask_common_from_evokeds(
+                    ev_t, ev_c, roi_candidates
+                )
+            except Exception as e:
+                _log_warn(f"HEP ROI pick failed for {a.subject_id}; skip: {e}")
+                del ev_t, ev_c
+                continue
 
             subj_hep_times = np.asarray(ev_t.times)
             if hep_times is None:
@@ -677,11 +789,19 @@ def run_analysis(
             hep_targets.append(y_t)
             hep_controls.append(y_c)
             hep_diffs.append(y_t - y_c)
+            hep_pick_masks.append(np.asarray(pick_mask, dtype=bool))
+            hep_used_subjects.append(a.subject_id)
 
             del ev_t, ev_c
 
         if len(hep_diffs) < 2:
             raise RuntimeError(f"Not enough subjects for HEP statistics after alignment for ROI={roi_name}")
+
+        hep_effective = _effective_channels_from_masks(
+            roi_candidates,
+            np.stack(hep_pick_masks, axis=0) if hep_pick_masks else np.zeros((0, len(roi_candidates)), bool),
+        )
+        _log_info(f"HEP ROI={roi_name}: effective_channels={hep_effective}")
 
         X_hep = np.stack(hep_diffs, axis=0)  # subj x time
         _log_info(f"HEP ROI={roi_name}: X shape={X_hep.shape}")
@@ -704,7 +824,7 @@ def run_analysis(
         out_png2 = out_dir / f"hep_{roi_name}_target_control.png"
         _plot_hep_overlay(
             roi_name=roi_name,
-            roi_chs=roi_chs,
+            roi_chs=hep_effective,
             times=hep_times,
             target_mean=hep_target_mean,
             control_mean=hep_control_mean,
@@ -739,6 +859,18 @@ def run_analysis(
         # Save minimal stats summary
         np.savez_compressed(
             out_dir / f"stats_{roi_name}.npz",
+            roi=str(roi_name),
+            roi_candidates=np.asarray(roi_candidates, dtype=str),
+            tfr_roi_channels=np.asarray(tfr_effective, dtype=str),
+            hep_roi_channels=np.asarray(hep_effective, dtype=str),
+            tfr_subjects=np.asarray(tfr_used_subjects, dtype=str),
+            hep_subjects=np.asarray(hep_used_subjects, dtype=str),
+            tfr_roi_pick_mask=np.stack(tfr_pick_masks, axis=0)
+            if len(tfr_pick_masks)
+            else np.zeros((0, len(roi_candidates)), dtype=bool),
+            hep_roi_pick_mask=np.stack(hep_pick_masks, axis=0)
+            if len(hep_pick_masks)
+            else np.zeros((0, len(roi_candidates)), dtype=bool),
             tfr_cluster_p_values=np.asarray(tfr_cluster_pv, float),
             tfr_clusters=np.stack(tfr_cluster_masks, axis=0) if len(tfr_cluster_masks) else np.zeros((0,) + X_tfr.shape[1:], dtype=bool),
             tfr_sig_mask=tfr_sig_mask,
@@ -801,10 +933,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_argparser().parse_args(argv)
 
     # ROI definition lives here (per spec: after loading, exploratory).
+    # ROI definitions are written as *candidates*.
+    # Actual channels are filtered per-subject to avoid failures due to cap/layout differences.
     roi_dict: Dict[str, List[str]] = {
-        "Frontal": ["Fz", "F1", "F2"],
+        "Frontal": ["Fz", "F1", "F2", "F3", "F4", "FCz", "FC1", "FC2", "Cz"],
         "Visual": ["Oz", "O1", "O2"],
-        "Parietal": ["Pz", "P3", "P4"],
+        "Parietal": ["Pz", "P3", "P4", "CPz", "CP1", "CP2"],
     }
 
     run_analysis(

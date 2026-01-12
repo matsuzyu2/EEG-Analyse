@@ -106,6 +106,17 @@ def _pick_roi_channels(info: mne.Info, roi_chs: List[str]) -> List[str]:
     return picked
 
 
+def _roi_pick_mask(info: mne.Info, roi_candidates: List[str]) -> Tuple[List[str], np.ndarray]:
+    """Pick existing ROI channels and return both names and a mask over candidates.
+
+    This provides a pickle-free way to persist per-subject channel usage.
+    """
+    picked = _pick_roi_channels(info, roi_candidates)
+    picked_set = set(picked)
+    mask = np.asarray([ch in picked_set for ch in roi_candidates], dtype=bool)
+    return picked, mask
+
+
 def _read_one_evoked(path: Path) -> mne.Evoked:
     obj = mne.read_evokeds(str(path), condition=0, verbose=False)
     if isinstance(obj, list):
@@ -121,6 +132,15 @@ def _roi_mean_from_evoked(ev: mne.Evoked, roi_chs: List[str]) -> np.ndarray:
     picked = _pick_roi_channels(ev.info, roi_chs)
     e = ev.copy().pick(picked)
     return e.data.mean(axis=0)
+
+
+def _roi_mean_and_mask_from_evoked(
+    ev: mne.Evoked, roi_candidates: List[str]
+) -> Tuple[np.ndarray, List[str], np.ndarray]:
+    picked, mask = _roi_pick_mask(ev.info, roi_candidates)
+    e = ev.copy().pick(picked)
+    y = e.data.mean(axis=0)
+    return y, picked, mask
 
 
 def _align_1d_to_reference(
@@ -383,11 +403,12 @@ def _collect_group_matrix(
     processed_dir: Path,
     subject_ids: Sequence[str],
     condition: str,
-    roi_chs: List[str],
+    roi_candidates: List[str],
     ref_times: np.ndarray,
-) -> Tuple[np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, List[str], np.ndarray]:
     ys: List[np.ndarray] = []
     used: List[str] = []
+    pick_masks: List[np.ndarray] = []
 
     for sid in subject_ids:
         path = _hep_path(processed_dir, sid, condition)
@@ -397,7 +418,7 @@ def _collect_group_matrix(
 
         try:
             ev = _read_one_evoked(path)
-            y = _roi_mean_from_evoked(ev, roi_chs)
+            y, _picked, pick_mask = _roi_mean_and_mask_from_evoked(ev, roi_candidates)
             subj_times = np.asarray(ev.times, dtype=float)
         except Exception as e:
             _log_warn(f"Failed to load/compute ROI mean for {sid} ({condition}); skip: {e}")
@@ -418,12 +439,33 @@ def _collect_group_matrix(
 
         ys.append(np.asarray(y, float))
         used.append(sid)
+        pick_masks.append(np.asarray(pick_mask, dtype=bool))
 
     if not ys:
         raise RuntimeError(f"No usable subjects after alignment for condition={condition}")
 
     X = np.stack(ys, axis=0)
-    return X, used
+    picked_mask = (
+        np.stack(pick_masks, axis=0)
+        if pick_masks
+        else np.zeros((0, len(roi_candidates)), dtype=bool)
+    )
+    return X, used, picked_mask
+
+
+def _effective_channels_from_masks(roi_candidates: List[str], masks: object) -> List[str]:
+    m = np.asarray(masks)
+    if m.size == 0:
+        return []
+    if m.ndim == 1:
+        any_mask = m.astype(bool)
+    elif m.ndim == 2:
+        any_mask = np.any(m.astype(bool), axis=0)
+    else:
+        raise ValueError("Masks must be 1D (candidates) or 2D (subjects x candidates)")
+    if any_mask.size != len(roi_candidates):
+        raise ValueError("ROI candidate/mask length mismatch")
+    return [ch for ch, ok in zip(roi_candidates, any_mask.tolist()) if ok]
 
 
 def run_analysis(
@@ -465,7 +507,7 @@ def run_analysis(
     for roi_name in roi_names:
         if roi_name not in roi_dict:
             raise KeyError(f"ROI '{roi_name}' not found. Available={list(roi_dict.keys())}")
-        roi_chs = roi_dict[roi_name]
+        roi_candidates = roi_dict[roi_name]
 
         for condition in ("target", "control"):
             condition_label = "Target" if condition == "target" else "Control"
@@ -478,19 +520,34 @@ def run_analysis(
             if ref_times is None:
                 raise RuntimeError(f"Could not determine reference times for condition={condition}")
 
-            X_good, good_used = _collect_group_matrix(
+            X_good, good_used, good_pick_mask = _collect_group_matrix(
                 processed_dir=processed_dir,
                 subject_ids=good_subjects,
                 condition=condition,
-                roi_chs=roi_chs,
+                roi_candidates=roi_candidates,
                 ref_times=ref_times,
             )
-            X_nongood, nongood_used = _collect_group_matrix(
+            X_nongood, nongood_used, nongood_pick_mask = _collect_group_matrix(
                 processed_dir=processed_dir,
                 subject_ids=nongood_subjects,
                 condition=condition,
-                roi_chs=roi_chs,
+                roi_candidates=roi_candidates,
                 ref_times=ref_times,
+            )
+
+            used_union_mask = np.any(
+                np.vstack([good_pick_mask, nongood_pick_mask]).astype(bool),
+                axis=0,
+            )
+            roi_effective = _effective_channels_from_masks(roi_candidates, used_union_mask)
+            if not roi_effective:
+                raise RuntimeError(
+                    f"No effective ROI channels after filtering: ROI={roi_name} condition={condition_label}"
+                )
+
+            # Log what was actually used (condition x ROI).
+            _log_info(
+                f"HEP {condition_label} ROI={roi_name}: effective_channels={roi_effective}"
             )
 
             _log_info(
@@ -515,7 +572,7 @@ def run_analysis(
             out_png = out_dir / f"hep_group_{condition}_Good_vs_NonGood_{roi_name}.png"
             _plot_hep_group_overlay(
                 roi_name=roi_name,
-                roi_chs=roi_chs,
+                roi_chs=roi_effective,
                 condition=condition_label,
                 times=ref_times,
                 good_mean=good_mean,
@@ -553,7 +610,12 @@ def run_analysis(
                 out_dir / f"stats_{roi_name}_{condition}.npz",
                 condition=str(condition_label),
                 roi=str(roi_name),
-                roi_channels=np.asarray(roi_chs, dtype=str),
+                # Backward compatible key: now stores effective channels actually used.
+                roi_channels=np.asarray(roi_effective, dtype=str),
+                # New keys: candidate list and per-subject usage masks.
+                roi_candidates=np.asarray(roi_candidates, dtype=str),
+                good_roi_pick_mask=np.asarray(good_pick_mask, dtype=bool),
+                nongood_roi_pick_mask=np.asarray(nongood_pick_mask, dtype=bool),
                 times_s=np.asarray(ref_times, float),
                 good_subjects=np.asarray(good_used, dtype=str),
                 nongood_subjects=np.asarray(nongood_used, dtype=str),
@@ -645,10 +707,15 @@ def build_argparser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_argparser().parse_args(argv)
 
+    # ROI definitions are written as *candidates*.
+    # Actual channels are filtered per-subject to avoid failures due to cap/layout differences.
     roi_dict: Dict[str, List[str]] = {
-        "Frontal": ["Fz", "F1", "F2"],
+        # ACC / frontocentral-friendly candidates.
+        # (F1/F2/FCz may not exist depending on montage; they are safe as candidates.)
+        "Frontal": ["Fz", "F1", "F2", "F3", "F4", "FCz", "FC1", "FC2", "Cz"],
         "Visual": ["Oz", "O1", "O2"],
-        "Parietal": ["Pz", "P3", "P4"],
+        # Some datasets may not have Pz; include CPz/CP1/CP2 as fallbacks.
+        "Parietal": ["Pz", "P3", "P4", "CPz", "CP1", "CP2"],
     }
 
     run_analysis(

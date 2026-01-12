@@ -60,9 +60,13 @@
 ### 3.2 ROI定義とROI平均（Data shaping）
 ROIはスクリプト内辞書 `roi_dict` として定義する（固定）。
 
-- `Frontal`: `["Fz", "F1", "F2"]`
+- `Frontal`: `["Fz", "F1", "F2", "F3", "F4", "FCz", "FC1", "FC2", "Cz"]`（候補）
 - `Visual`: `["Oz", "O1", "O2"]`
-- `Parietal`: `["Pz", "P3", "P4"]`
+- `Parietal`: `["Pz", "P3", "P4", "CPz", "CP1", "CP2"]`（候補）
+
+備考:
+- ROIの定義は「候補チャンネル」のリストとして持ち、被験者ごとのEvokedに存在しないチャンネルは自動的に除外して平均する（存在chのみで平均）。
+- 候補が多いのは、計測モンタージュ差（例: `F1/F2/FCz/Pz` が無い）に対して解析を壊さないため。
 
 ROI平均（Evoked → 1D時系列）:
 - EvokedからROIチャンネルを `pick` し、`data.mean(axis=0)` を取る。
@@ -149,12 +153,18 @@ ROI（複数指定可）× 条件（Target/Control）ごとに以下を生成す
 - `stats_<ROI>_control.npz`
 
 主な保存キー（代表）:
-- メタ情報: `condition`, `roi`, `roi_channels`, `times_s`
+- メタ情報: `condition`, `roi`, `roi_channels`, `roi_candidates`, `times_s`
 - 被験者ID: `good_subjects`, `nongood_subjects`
 - データ行列: `X_good`, `X_nongood`
 - 記述統計: `good_mean`, `nongood_mean`, `good_sem`, `nongood_sem`
 - 検定出力: `T_obs`, `cluster_p_values`, `clusters`, `sig_mask`
 - 解析パラメータ: `n_permutations`, `cluster_alpha`, `alpha`, `tail`, `seed`
+
+ROIチャンネル関連:
+- `roi_candidates`: ROIの候補チャンネル（固定）
+- `roi_channels`: 当該条件×ROIで、実データに存在し「実際に使われたチャンネル」（候補のサブセット）
+- `good_roi_pick_mask`: `(n_good, n_candidates)` のbool。被験者ごとに、候補のうち採用されたチャンネル
+- `nongood_roi_pick_mask`: `(n_nongood, n_candidates)` のbool。同上
 
 形状の目安:
 - `times_s`: `(n_times,)`
