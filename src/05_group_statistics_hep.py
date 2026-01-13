@@ -305,6 +305,69 @@ def _cluster_to_1d_mask(cluster: object, n_times: int) -> np.ndarray:
     raise TypeError(f"Unsupported cluster type: {type(cluster)}")
 
 
+def _plot_hep_group_overlay_ax(
+    ax: plt.Axes,
+    *,
+    roi_name: str,
+    roi_chs: List[str],
+    times: np.ndarray,
+    good_mean: np.ndarray,
+    nongood_mean: np.ndarray,
+    good_sem: np.ndarray,
+    nongood_sem: np.ndarray,
+    sig_mask: np.ndarray,
+    show_xlabel: bool,
+    show_legend: bool,
+) -> None:
+    times_ms = times * 1e3
+
+    ax.plot(times_ms, good_mean * 1e6, color="red", lw=2, label="Good")
+    ax.fill_between(
+        times_ms,
+        (good_mean - good_sem) * 1e6,
+        (good_mean + good_sem) * 1e6,
+        color="red",
+        alpha=0.2,
+        linewidth=0,
+    )
+
+    ax.plot(times_ms, nongood_mean * 1e6, color="blue", lw=2, label="Non-Good")
+    ax.fill_between(
+        times_ms,
+        (nongood_mean - nongood_sem) * 1e6,
+        (nongood_mean + nongood_sem) * 1e6,
+        color="blue",
+        alpha=0.2,
+        linewidth=0,
+    )
+
+    ax.axvline(0, color="k", lw=1, alpha=0.6)
+    if show_xlabel:
+        ax.set_xlabel("Time (ms)")
+    ax.set_ylabel("Amplitude (µV)")
+    ax.set_title(f"{roi_name} ({', '.join(roi_chs)})")
+    ax.grid(True, alpha=0.3)
+    if show_legend:
+        ax.legend(loc="upper right")
+
+    if sig_mask.any():
+        ymin, ymax = ax.get_ylim()
+        bar_y = ymin + 0.05 * (ymax - ymin)
+        sig = sig_mask.astype(bool)
+        idx = np.where(sig)[0]
+        if idx.size > 0:
+            starts = [idx[0]]
+            ends: List[int] = []
+            for i in range(1, len(idx)):
+                if idx[i] != idx[i - 1] + 1:
+                    ends.append(idx[i - 1])
+                    starts.append(idx[i])
+            ends.append(idx[-1])
+
+            for s, e in zip(starts, ends):
+                ax.hlines(y=bar_y, xmin=times_ms[s], xmax=times_ms[e], colors="k", linewidth=6)
+
+
 def _plot_hep_group_overlay(
     *,
     roi_name: str,
@@ -345,7 +408,7 @@ def _plot_hep_group_overlay(
     ax.axvline(0, color="k", lw=1, alpha=0.6)
     ax.set_xlabel("Time (ms)")
     ax.set_ylabel("Amplitude (µV)")
-    ax.set_title(f"HEP {condition} ROI={roi_name} ({', '.join(roi_chs)})")
+    ax.set_title(f"{roi_name} ({', '.join(roi_chs)})")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
 
@@ -504,13 +567,27 @@ def run_analysis(
 
     summary_rows: List[Dict[str, str]] = []
 
+    roi_names = [str(x) for x in roi_names]
     for roi_name in roi_names:
         if roi_name not in roi_dict:
             raise KeyError(f"ROI '{roi_name}' not found. Available={list(roi_dict.keys())}")
-        roi_candidates = roi_dict[roi_name]
 
-        for condition in ("target", "control"):
-            condition_label = "Target" if condition == "target" else "Control"
+    for condition in ("target", "control"):
+        condition_label = "Target" if condition == "target" else "Control"
+
+        fig_height = 3.6 * max(1, len(roi_names))
+        fig, axes = plt.subplots(
+            nrows=len(roi_names),
+            ncols=1,
+            figsize=(8, fig_height),
+            constrained_layout=True,
+            sharex=True,
+        )
+        axes_list = [cast(plt.Axes, axes)] if len(roi_names) == 1 else list(np.ravel(axes))
+
+        for i, roi_name in enumerate(roi_names):
+            roi_candidates = roi_dict[roi_name]
+            ax = cast(plt.Axes, axes_list[i])
 
             ref_times = _find_reference_times(
                 processed_dir,
@@ -545,11 +622,9 @@ def run_analysis(
                     f"No effective ROI channels after filtering: ROI={roi_name} condition={condition_label}"
                 )
 
-            # Log what was actually used (condition x ROI).
             _log_info(
                 f"HEP {condition_label} ROI={roi_name}: effective_channels={roi_effective}"
             )
-
             _log_info(
                 f"HEP {condition_label} ROI={roi_name}: X_good={X_good.shape} X_nongood={X_nongood.shape}"
             )
@@ -569,20 +644,19 @@ def run_analysis(
             good_sem = stats.sem(X_good, axis=0, nan_policy="omit")
             nongood_sem = stats.sem(X_nongood, axis=0, nan_policy="omit")
 
-            out_png = out_dir / f"hep_group_{condition}_Good_vs_NonGood_{roi_name}.png"
-            _plot_hep_group_overlay(
+            _plot_hep_group_overlay_ax(
+                ax,
                 roi_name=roi_name,
                 roi_chs=roi_effective,
-                condition=condition_label,
                 times=ref_times,
                 good_mean=good_mean,
                 nongood_mean=nongood_mean,
                 good_sem=good_sem,
                 nongood_sem=nongood_sem,
                 sig_mask=sig_mask,
-                out_png=out_png,
+                show_xlabel=(i == len(roi_names) - 1),
+                show_legend=(i == 0),
             )
-            _log_info(f"Saved: {out_png}")
 
             # Summarize significant clusters
             cluster_id = 0
@@ -637,6 +711,12 @@ def run_analysis(
                 tail=int(tail),
                 seed=int(seed),
             )
+
+        out_svg = out_dir / f"hep_group_{condition}_Good_vs_NonGood_all_rois.svg"
+        out_svg.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_svg, format="svg", bbox_inches="tight")
+        plt.close(fig)
+        _log_info(f"Saved: {out_svg}")
 
     summary_path = out_dir / "statistics_summary.csv"
     df = pd.DataFrame(
