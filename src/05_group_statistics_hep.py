@@ -40,11 +40,11 @@ def _default_out_dir() -> Path:
 
 def _load_good_responders(csv_path: Path) -> List[str]:
     if not csv_path.exists():
-        raise FileNotFoundError(f"good_responders.csv not found: {csv_path}")
+        raise FileNotFoundError(f"good_responders_median.csv not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
     if "session_id" not in df.columns:
-        raise ValueError("good_responders.csv must contain a 'session_id' column")
+        raise ValueError("good_responders_median.csv must contain a 'session_id' column")
 
     ids = [str(x).strip() for x in df["session_id"].tolist()]
     ids = [x for x in ids if x]
@@ -738,8 +738,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--good_csv",
         type=str,
-        default=str(_repo_root() / "data" / "classification" / "good_responders.csv"),
-        help="Path to good_responders.csv",
+        default=str(_repo_root() / "data" / "classification" / "good_responders_median.csv"),
+        help="Path to good_responders_median.csv",
     )
     p.add_argument(
         "--processed_dir",

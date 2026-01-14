@@ -16,7 +16,7 @@
 ## 2. 入力（Input）
 
 ### 2.1 Good Responders の定義元
-- 既定: `data/classification/good_responders.csv`
+- 既定: `data/classification/good_responders_median.csv`
 - 必須列: `session_id`
 - `session_id` は `subject_id` として扱う（`data/processed/<sid>/` のディレクトリ名と一致する前提）。
 - CSV内のIDは、**順序保持・重複除去**して読み込む。
@@ -48,7 +48,7 @@
 ## 3. 処理フロー（Processing Logic）
 
 ### 3.1 被験者選定（Good/Non-Good の振り分け）
-1. `good_responders.csv` から Good候補のIDリストを読み取り（順序保持・重複除去）。
+1. `good_responders_median.csv` から Good候補のIDリストを読み取り（順序保持・重複除去）。
 2. `processed_dir` 配下の被験者ディレクトリを列挙。
 3. Good候補のうち、`processed_dir` に存在するものだけを Good として採用（存在しないものは警告して除外）。
 4. Non-Good は「`processed_dir` に存在し、Good に含まれないもの」として定義。
@@ -190,7 +190,7 @@ ROIチャンネル関連:
 ## 5. CLIオプション（Command Line Arguments）
 
 ### 5.1 主要引数とデフォルト
-- `--good_csv`（default: `data/classification/good_responders.csv`）
+- `--good_csv`（default: `data/classification/good_responders_median.csv`）
   - Good Responders を定義するCSV。
 - `--processed_dir`（default: `data/processed/`）
   - 被験者ごとの中間生成物ディレクトリ。

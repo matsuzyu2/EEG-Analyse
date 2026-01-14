@@ -55,7 +55,7 @@
 - 前処理済みEEG: `data/processed/<subject_id>/<subject_id>_sess01_clean.fif`, `..._sess02_clean.fif`
 - 条件マニフェスト: `data/processed/<subject_id>/conditions_manifest.json`
 - ECGピーク: `data/ecg/<subject_id>/*Session_01*.json`, `*Session_02*.json`
-- Good Responders: `data/classification/good_responders.csv`（`session_id` 列を subject_id として扱う）
+- Good Responders: `data/classification/good_responders_median.csv`（`session_id` 列を subject_id として扱う）
 
 ### 3.2 中間生成物
 - TFR（AverageTFR, HDF5）

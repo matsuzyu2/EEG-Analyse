@@ -17,7 +17,7 @@ Good Responders に限定して、被験者内差分
 
 ## 2. 入力
 ### 2.1 Good Responders リスト
-- 既定: `data/classification/good_responders.csv`
+- 既定: `data/classification/good_responders_median.csv`
 - 必須列: `session_id`
 - `session_id` は `subject_id` として扱う（前処理/中間生成物のディレクトリ名と一致する前提）
 
@@ -32,7 +32,7 @@ Good Responders に限定して、被験者内差分
 欠損がある被験者は警告ログの上でスキップする。
 
 ## 3. 被験者抽出フロー（データ存在確認）
-1. `good_responders.csv` から `session_id` を読み取り（順序保持・重複除去）
+1. `good_responders_median.csv` から `session_id` を読み取り（順序保持・重複除去）
 2. `data/processed/<sid>/` の存在確認
 3. 上記4 artifact の存在確認
 4. 揃った被験者のみを解析対象とする
@@ -148,7 +148,7 @@ NPZの主な保存キー（代表）:
 
 ## 9. CLI仕様（主要）
 デフォルト:
-- `--good_csv data/classification/good_responders.csv`
+- `--good_csv data/classification/good_responders_median.csv`
 - `--out_dir data/group_analysis_within_subject/`
 - `--roi Frontal`
 
